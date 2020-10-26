@@ -27,3 +27,5 @@ Footnote example[^1], or with a word[^word].
 - [X] Apples
 - [X] Broccoli
 - [ ] Carrots
+
+日本語で検索できるようになったよ！

@@ -472,5 +472,6 @@ window.search = window.search || {};
 
     init();
     // Exported functions
+    console.log("init")
     search.hasFocus = hasFocus;
 })(window.search);

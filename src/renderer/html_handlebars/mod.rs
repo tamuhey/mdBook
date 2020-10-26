@@ -7,3 +7,6 @@ mod helpers;
 
 #[cfg(feature = "search")]
 mod search;
+
+#[cfg(feature = "search")]
+mod tokenizer;

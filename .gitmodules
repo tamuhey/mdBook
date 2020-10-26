@@ -1,0 +1,3 @@
+[submodule "tinysearch"]
+	path = tinysearch
+	url = https://github.com/tamuhey/tinysearch

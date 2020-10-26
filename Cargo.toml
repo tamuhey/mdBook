@@ -27,7 +27,7 @@ memchr = "2.0"
 open = "1.1"
 pulldown-cmark = "0.7.0"
 regex = "1.0.0"
-serde = "1.0"
+serde = "1.0.116"
 serde_derive = "1.0"
 serde_json = "1.0"
 shlex = "0.1"
@@ -44,8 +44,20 @@ tokio = { version = "0.2.18", features = ["macros"], optional = true }
 warp = { version = "0.2.2", default-features = false, features = ["websocket"], optional = true }
 
 # Search feature
-elasticlunr-rs = { version = "2.3", optional = true, default-features = false }
 ammonia = { version = "3", optional = true }
+rust_icu_sys = {git="https://github.com/google/rust_icu"}
+rust_icu_ubrk = {git="https://github.com/google/rust_icu"}
+tinysearch-shared = {path="shared"}
+phf = "0.8.0"
+includedir = "0.6.0"
+
+[dependencies.cuckoofilter]
+version = "0.5.0"
+default-features = false 
+features = ["serde_support"]
+
+[build-dependencies]
+includedir_codegen = "0.6.0"
 
 [dev-dependencies]
 select = "0.5"
@@ -56,7 +68,7 @@ walkdir = "2.0"
 default = ["watch", "serve", "search"]
 watch = ["notify", "gitignore"]
 serve = ["futures-util", "tokio", "warp"]
-search = ["elasticlunr-rs", "ammonia"]
+search = ["ammonia"]
 
 [[bin]]
 doc = false

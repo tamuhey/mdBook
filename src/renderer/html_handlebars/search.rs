@@ -1,8 +1,12 @@
+use super::tokenizer::tokenize;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::env;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::Path;
+use tempfile::tempdir;
 
-use elasticlunr::Index;
 use pulldown_cmark::*;
 
 use crate::book::{Book, BookItem};
@@ -10,44 +14,109 @@ use crate::config::Search;
 use crate::errors::*;
 use crate::theme::searcher;
 use crate::utils;
+use cuckoofilter::CuckooFilter;
+use std::process::{Command, Stdio};
+use tinysearch_shared::{Filters as _Filters, Storage};
+
+type PostID = (String, String, String);
+type Filters = _Filters<PostID>;
+
+include!(concat!(env!("OUT_DIR"), "/engine.rs"));
+
+pub fn run_output(cmd: &mut Command) -> Result<String, Error> {
+    debug!("running {:?}", cmd);
+    let output = cmd
+        .stderr(Stdio::inherit())
+        .output()
+        .context(format!("failed to run {:?}", cmd))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        anyhow::bail!("failed to execute {:?}\nstatus: {}", cmd, output.status)
+    }
+}
 
 /// Creates all files required for search.
 pub fn create_files(search_config: &Search, destination: &Path, book: &Book) -> Result<()> {
-    let mut index = Index::new(&["title", "body", "breadcrumbs"]);
-    let mut doc_urls = Vec::with_capacity(book.sections.len());
+    let mut index = Filters::new();
 
     for item in book.iter() {
-        render_item(&mut index, &search_config, &mut doc_urls, item)?;
+        render_item(&mut index, &search_config, item)?;
     }
 
-    let index = write_to_json(index, &search_config, doc_urls)?;
+    let storage = Storage::from(index);
     debug!("Writing search index ✓");
-    if index.len() > 10_000_000 {
-        warn!("searchindex.json is very large ({} bytes)", index.len());
-    }
 
+    utils::fs::write_file(destination, "storage", &storage.to_bytes()?)?;
+    utils::fs::write_file(destination, "searcher.js", searcher::JS)?;
+    utils::fs::write_file(destination, "init.js", searcher::INIT_JS)?;
+    create_search_engine(destination)?;
     if search_config.copy_js {
-        utils::fs::write_file(destination, "searchindex.json", index.as_bytes())?;
-        utils::fs::write_file(
-            destination,
-            "searchindex.js",
-            format!("Object.assign(window.search, {});", index).as_bytes(),
-        )?;
-        utils::fs::write_file(destination, "searcher.js", searcher::JS)?;
         utils::fs::write_file(destination, "mark.min.js", searcher::MARK_JS)?;
-        utils::fs::write_file(destination, "elasticlunr.min.js", searcher::ELASTICLUNR_JS)?;
         debug!("Copying search files ✓");
     }
 
     Ok(())
 }
 
+fn extract_engine(temp_dir: &Path) -> Result<(), Error> {
+    for file in FILES.file_names() {
+        // This hack removes the "../" prefix that
+        // gets introduced by including the crates
+        // from the `bin` parent directory.
+        let filepath = file.trim_start_matches("../");
+        let outpath = temp_dir.join(filepath);
+        if let Some(parent) = outpath.parent() {
+            debug!("Creating parent dir {:?}", &parent);
+            fs::create_dir_all(&parent)?;
+        }
+        debug!("Extracting {:?}", &outpath);
+        let content = FILES.get(file)?;
+        let mut outfile = File::create(&outpath)?;
+        outfile.write_all(&content)?;
+    }
+    Ok(())
+}
+
+fn create_search_engine(destination: &Path) -> Result<(), Error> {
+    FILES.set_passthrough(env::var_os("PASSTHROUGH").is_some());
+
+    let temp_dir = tempdir()?;
+    let path = temp_dir.path();
+    info!("Extracting tinysearch WASM engine");
+    extract_engine(path)?;
+    debug!("Crate content extracted to {:?}/", &temp_dir);
+
+    info!("Copying index into crate");
+    fs::copy(destination.join("storage"), path.join("engine/storage"))?;
+
+    info!("Compiling WASM module using wasm-pack");
+    wasm_pack(&path.join("engine"), destination)?;
+
+    info!("All done. Open the output folder with a web server to try a demo.");
+    Ok(())
+}
+
+fn wasm_pack(in_dir: &Path, out_dir: &Path) -> Result<String, Error> {
+    Ok(run_output(
+        Command::new("wasm-pack")
+            .arg("build")
+            .arg(in_dir)
+            .arg("--target")
+            .arg("web")
+            .arg("--release")
+            .arg("--out-dir")
+            .arg(out_dir),
+    )?)
+}
+
 /// Uses the given arguments to construct a search document, then inserts it to the given index.
 fn add_doc(
-    index: &mut Index,
-    doc_urls: &mut Vec<String>,
+    index: &mut Filters,
     anchor_base: &str,
     section_id: &Option<String>,
+    title: &str,
+    breadcrumb: &str,
     items: &[&str],
 ) {
     let url = if let Some(ref id) = *section_id {
@@ -56,20 +125,25 @@ fn add_doc(
         Cow::Borrowed(anchor_base)
     };
     let url = utils::collapse_whitespace(url.trim());
-    let doc_ref = doc_urls.len().to_string();
-    doc_urls.push(url.into());
 
-    let items = items.iter().map(|&x| utils::collapse_whitespace(x.trim()));
-    index.add_doc(&doc_ref, items);
+    let mut words = HashSet::new();
+    for item in items.into_iter().chain(&[title, breadcrumb]) {
+        for word in tokenize(item) {
+            words.insert(word);
+        }
+    }
+    let mut filter = CuckooFilter::with_capacity(words.len() + 64);
+    for word in words {
+        filter.add(word).unwrap();
+    }
+    index.push((
+        (title.to_owned(), url.to_string(), breadcrumb.to_owned()),
+        filter,
+    ));
 }
 
 /// Renders markdown into flat unformatted text and adds it to the search index.
-fn render_item(
-    index: &mut Index,
-    search_config: &Search,
-    doc_urls: &mut Vec<String>,
-    item: &BookItem,
-) -> Result<()> {
+fn render_item(index: &mut Filters, search_config: &Search, item: &BookItem) -> Result<()> {
     let chapter = match *item {
         BookItem::Chapter(ref ch) if !ch.is_draft_chapter() => ch,
         _ => return Ok(()),
@@ -94,6 +168,7 @@ fn render_item(
     let mut body = String::new();
     let mut breadcrumbs = chapter.parent_names.clone();
     let mut footnote_numbers = HashMap::new();
+    let title = &chapter.name;
 
     while let Some(event) = p.next() {
         match event {
@@ -103,10 +178,11 @@ fn render_item(
                     // Write the data to the index, and clear it for the next section
                     add_doc(
                         index,
-                        doc_urls,
                         &anchor_base,
                         &section_id,
-                        &[&heading, &body, &breadcrumbs.join(" » ")],
+                        &title,
+                        &breadcrumbs.join(" » "),
+                        &[&heading, &body, &title],
                     );
                     section_id = None;
                     heading.clear();
@@ -167,75 +243,15 @@ fn render_item(
         // Make sure the last section is added to the index
         add_doc(
             index,
-            doc_urls,
             &anchor_base,
             &section_id,
-            &[&heading, &body, &breadcrumbs.join(" » ")],
+            &title,
+            &breadcrumbs.join(" » "),
+            &[&heading, &body, &title],
         );
     }
 
     Ok(())
-}
-
-fn write_to_json(index: Index, search_config: &Search, doc_urls: Vec<String>) -> Result<String> {
-    use elasticlunr::config::{SearchBool, SearchOptions, SearchOptionsField};
-    use std::collections::BTreeMap;
-
-    #[derive(Serialize)]
-    struct ResultsOptions {
-        limit_results: u32,
-        teaser_word_count: u32,
-    }
-
-    #[derive(Serialize)]
-    struct SearchindexJson {
-        /// The options used for displaying search results
-        results_options: ResultsOptions,
-        /// The searchoptions for elasticlunr.js
-        search_options: SearchOptions,
-        /// Used to lookup a document's URL from an integer document ref.
-        doc_urls: Vec<String>,
-        /// The index for elasticlunr.js
-        index: elasticlunr::Index,
-    }
-
-    let mut fields = BTreeMap::new();
-    let mut opt = SearchOptionsField::default();
-    opt.boost = Some(search_config.boost_title);
-    fields.insert("title".into(), opt);
-    opt.boost = Some(search_config.boost_paragraph);
-    fields.insert("body".into(), opt);
-    opt.boost = Some(search_config.boost_hierarchy);
-    fields.insert("breadcrumbs".into(), opt);
-
-    let search_options = SearchOptions {
-        bool: if search_config.use_boolean_and {
-            SearchBool::And
-        } else {
-            SearchBool::Or
-        },
-        expand: search_config.expand,
-        fields,
-    };
-
-    let results_options = ResultsOptions {
-        limit_results: search_config.limit_results,
-        teaser_word_count: search_config.teaser_word_count,
-    };
-
-    let json_contents = SearchindexJson {
-        results_options,
-        search_options,
-        doc_urls,
-        index,
-    };
-
-    // By converting to serde_json::Value as an intermediary, we use a
-    // BTreeMap internally and can force a stable ordering of map keys.
-    let json_contents = serde_json::to_value(&json_contents)?;
-    let json_contents = serde_json::to_string(&json_contents)?;
-
-    Ok(json_contents)
 }
 
 fn clean_html(html: &str) -> String {
