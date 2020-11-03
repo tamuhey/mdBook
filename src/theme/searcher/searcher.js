@@ -434,16 +434,21 @@ window.search = window.search || {};
 
     // tokenize string and combine them with whitespace
     function tokenize(text) {
-        var it = Intl.v8BreakIterator(["en"], { type: 'word' })
-        it.adoptText(text)
-        var words = []
-        var cur = 0, prev = 0
-        while (cur < text.length) {
-            prev = cur
-            cur = it.next()
-            words.push(text.substring(prev, cur))
+        if (typeof Intl.v8BreakIterator === "function") {
+            var it = Intl.v8BreakIterator(["en"], { type: 'word' })
+            it.adoptText(text)
+            var words = []
+            var cur = 0, prev = 0
+            while (cur < text.length) {
+                prev = cur
+                cur = it.next()
+                words.push(text.substring(prev, cur))
+            }
+            return words.join(" ")
+        } else {
+            // TODO: impl tokenizer except for V8
+            return text;
         }
-        return words.join(" ")
     }
     // And afterwards we can use all the functionality defined in wasm.
     function doSearch(searchterm) {
