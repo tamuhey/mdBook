@@ -8,7 +8,7 @@ pub fn tokenize(text: &str) -> impl Iterator<Item = &str> {
     iter.scan((0, 0), move |s, x| {
         let (l, prev) = *s;
         let x = x as usize;
-        if let Some(r) = ids.nth(x - prev - 1).map(|(a, _)| a) {
+        if let Some((r, _)) = ids.nth(x - prev - 1) {
             *s = (r, x);
             Some(&text[l..r])
         } else {
