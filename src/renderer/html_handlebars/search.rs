@@ -132,7 +132,7 @@ fn add_doc(
             words.insert(word);
         }
     }
-    let mut filter = CuckooFilter::with_capacity(words.len() + 64);
+    let mut filter = CuckooFilter::with_capacity(words.len() * 10);
     for word in words {
         filter.add(word).unwrap();
     }
